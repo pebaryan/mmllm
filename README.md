@@ -89,3 +89,9 @@ and `tools/gpu_bench`.
 
 MIT — do whatever you want with this. Needle 3 weights are Apache-2.0 (Cactus Compute) and are not
 included in this repository.
+
+## GPU comparison
+
+Six GPUs (GT218, HD 6450, Quadro 2000, 8600 GTS, Quadro K2000, Quadro 4000) were run through the same
+engine on an Atom D525 machine: see [GPU_RESULTS.md](GPU_RESULTS.md). Best result: Quadro K2000
+reclocked to its top `pstate`, GPT-2 small at ~33 tokens/s.
