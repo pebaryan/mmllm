@@ -31,25 +31,34 @@ The weights are `Cactus-Compute/needle3` on Hugging Face (`needle3.cact`, 35 MB)
 * `--quant` (default) simulates the engine's int8 activations / int8 KV cache, which is what the archive
   was tuned for. `--no-quant` uses float activations.
 
-## What is NOT implemented (the shipped engine does these)
+Also implemented since the first version: prefix caching and a localhost `--serve` mode (POST
+`/complete {"input":...}`, POST `/reset`), grammar-constrained decoding of the call block from the tool
+schemas (`--no-grammar` to disable), an evidence-based argument repair step and withholding gates
+(`--no-repair` to disable), the confidence head, and multi-turn conversations.
 
-* Grammar-constrained decoding (the model is run greedily; output is parsed afterwards).
-* The deterministic argument repair step (e.g. it drops a `brightness: 0` the user never stated).
-* The confidence head and the suppression gates.
-* Multi-turn conversations, tool-name snake_casing / alias table, tool retrieval (> 5 tools).
+## What is NOT implemented / known differences
+
+* Tool-name snake_casing / alias table and tool retrieval (> 5 tools).
 * The engine's 256-token KV window (prompts longer than ~256 tokens may differ).
+* Tool-result turns do not reliably reproduce the official engine: it answers `respond` (empty call
+  list) to most plain results, while this port can flip into a call because the next-token margins in
+  the reasoning text are only 0.02–0.4 logits and the int8 arithmetic differs slightly.
+* The repair step is a reconstruction from observed behaviour, not the engine's code.
 
 ## Verification
 
 * NumPy reference (`tools/needle_ref/`) vs the **JAX reference**: cosine 1.0, max logit diff 8e-5.
 * C++ vs NumPy golden data (`--needle-test tools/needle_ref/golden`): tokenizer ids identical; float
   logits max diff 5e-5; with the int8 simulation cosine 0.99999 and the same top choice.
-* End to end vs the official x86-64 runner on 10 queries: reasoning text identical 10/10, function
-  calls identical 9/10 (the exception is the repair step above).
+* End to end vs the official x86-64 runner on a 47-query battery (`tools/needle_battery`, four tool
+  sets): function calls identical 45/47, reasoning text identical 38/47, confidence differs by 0.019 on
+  average. The remaining differences are near-tie tokens.
 
-## Speed (Mac mini 2009, Core 2 Duo P7350, 2 threads, 113-token prompt)
+## Speed (Mac mini 2009, Core 2 Duo P7350, 2 threads)
 
-prefill ~34 tok/s, decode ~27 tok/s, ~510 MB RAM; the official runner: 9.7 / 6.9 tok/s.
+Decode ~27.5 tok/s, prefill ~33 tok/s, ~105 MB peak RAM; the official runner on the same machine:
+6.8 tok/s decode, 9.7 tok/s prefill, 79 MB. About 1.6–2 s per query in `--serve` mode (the tool prefix,
+~5 s, is computed once).
 
 ## Confidence
 The probe head is implemented on the CPU (nmodel.cpp). `confidence = min(sigmoid(head), lowest probability of the call tokens the model chose itself)`; calls with confidence < 0.1 are moved to `suppressed_calls`. On a 47-query battery the calls match the official engine in 45/47 cases and confidence differs by 0.03 on average. Set NEEDLE_CONF_DEBUG=1 to print the components.

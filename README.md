@@ -1,147 +1,91 @@
 # mmllm — Minimal GLSL LLM Inference Engine
 
-**mmllm** is a minimal LLM inference engine that uses **OpenGL 3.3 fragment shaders (GLSL 3.30)** to accelerate small transformer language models on old GPUs.
+**mmllm** runs small transformer language models on old GPUs using nothing but **OpenGL 3.3 fragment
+shaders (GLSL 3.30)**: no CUDA, no OpenCL, and **no X server** (it creates a surfaceless EGL context on
+the DRM render node, so it works over SSH).
 
-Instead of CUDA or OpenCL, it uses the classic "render-to-texture" GPGPU approach:
-- Matrices are stored as **RGBA32F textures** (4 floats per texel)
-- Matrix multiplication is a **fragment shader** running on a full-screen quad
-- Each pass computes 4 output elements, accumulated via 4-wide dot products
-- Pipelines chain through **FBOs** (Framebuffer Objects)
+It also contains a **CPU port of Cactus Needle 3**, a 121M-parameter tool-calling model — see
+[NEEDLE.md](NEEDLE.md).
 
-## Target Hardware
+The classic "render-to-texture" GPGPU approach:
+- Weights, activations and the KV cache live in **textures** (RGBA16F for weights/KV, RGBA32F for activations)
+- Matrix multiplication is a **fragment shader** drawn over a full-screen triangle
+- Each fragment computes 4 output elements with 4-wide dot products
+- Stages chain through **FBOs**; LayerNorm, attention and the LM head also run on the GPU
 
-- **Macmini3,1** (early 2009) with **NVIDIA GeForce 9400M**
-- **ZorinOS** (Ubuntu Jammy) with **nouveau** driver → OpenGL 3.3
-- Target model: **TinyStories-1M** (~4 MB FP32, fits in GPU memory)
+## Target hardware
 
-## Architecture
+- **Macmini3,1** (early 2009), **NVIDIA GeForce 9400M** (shared memory, ~200 MB usable), Core 2 Duo P7350
+- Zorin OS 17 / Ubuntu 22.04, kernel 6.8, **nouveau** + Mesa → OpenGL 3.3
 
-```
-                    ┌─────────────────────┐
- Token IDs ─────────▶  CPU Embedding      │
-                    └────────┬────────────┘
-                             ▼
-                    ┌─────────────────────┐
-                    │  Block 0..N         │
-                    │  ┌───────────────┐  │
-                    │  │ LayerNorm     │  │  (fragment shader)
-                    │  │ Self-Attention│  │  (MatMul + CPU softmax)
-                    │  │ Residual Add  │  │  (fragment shader)
-                    │  │ LayerNorm     │  │  (fragment shader)
-                    │  │ FFN Gate      │  │  (MatMul shader)
-                    │  │ GELU          │  │  (fragment shader)
-                    │  │ FFN Down      │  │  (MatMul shader)
-                    │  │ Residual Add  │  │  (fragment shader)
-                    │  └───────────────┘  │
-                    └────────┬────────────┘
-                             ▼
-                    ┌─────────────────────┐
-                    │  Final LayerNorm    │
-                    │  LM Head (MatMul)   │
-                    │  Softmax + Sample   │
-                    └────────┬────────────┘
-                             ▼
-                      Next Token ID
-```
+## Measured results (Mac mini above)
 
-## Data Layout
+Greedy output of every model below was checked against the HuggingFace reference.
 
-| Concept | Implementation |
-|---|---|
-| Matrix packing | 4 elements per RGBA32F texel (column-major within texel) |
-| Texture A (M×K) | Size: [⌈K/4⌉, M], element A[m][k] = texel(k/4, m).channel(k%4) |
-| Texture B (K×N) | Size: [⌈N/4⌉, K], element B[k][n] = texel(n/4, k).channel(n%4) |
-| MatMul C = A·B | Render to [⌈N/4⌉, M]. Each fragment computes 4 output elements |
-| Inner loop | 4-wide dot product: sum_q A[m][k·4+q] · B[k·4+q][n·4+c] |
+| Model | Params | tok/s (GPU) |
+|---|---|---|
+| TinyStories-3M | 3M | ~74 |
+| TinyStories-8M | 8M | ~45 |
+| TinyStories-28M | 28M | ~23 |
+| TinyStories-33M | 33M | ~15.5 |
+| GPT-2 small | 124M | ~9 (LM head on the CPU) |
+
+Hardware limits that shaped the code (details in the source comments):
+
+- Never sample a texture wider than 4096 texels or taller than 2048 rows (the LM-head table is split
+  across several textures).
+- Do not unroll the matmul K loop: it hung the whole machine.
+- ~200 MB GPU memory budget; going over it is a cliff (≈5× slower, then `ENOMEM`). Weights and KV are
+  fp16, and the LM head falls back to the CPU automatically when the footprint is too large
+  (`MMLLM_LM=cpu|gpu`, `MMLLM_GPU_BUDGET_MB`).
+- Texture uploads race with queued draws; `glFinish()` before uploading into a texture the GPU may still read.
+- The GPU is ~7–8× slower with no display server running at all, so keep GDM (or any X server) up.
 
 ## Building
 
 ```bash
-# Install dependencies (Ubuntu/ZorinOS)
-sudo apt install build-essential cmake libgl1-mesa-dev libglew-dev python3-pip
-
-# Build
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
-
-# Run self-test (verifies GPU functionality)
-./mmllm --self-test
+sudo apt install build-essential cmake libegl1-mesa-dev libgl1-mesa-dev libglew-dev python3-pip
+mkdir -p build && cd build && cmake .. && make -j$(nproc)
+./mmllm --self-test          # checks the GL context and the matmul shader
 ```
 
-## Getting a Model
+Run from the repository root or from `build/`: the executable finds `src/shaders` in either place.
 
-### Option A: Download from HuggingFace (if available)
+## Getting a model
 
 ```bash
-# Install Python deps
 pip install torch transformers numpy
-
-# Download and export
-python3 tools/download_model.sh
-```
-
-### Option B: Generate a dummy model for testing
-
-```bash
-# Create a random 2-layer test model
-python3 tools/export_model.py --dummy --output models/test.mlm
-
-# Or configure dimensions
-python3 tools/export_model.py --dummy --output models/test.mlm \
-    --config '{"d_model": 64, "n_layers": 2, "ffn_hidden": 256}'
-```
-
-### Option C: Export your own model
-
-```bash
-# From HuggingFace
-python3 tools/export_model.py --model roneneldan/TinyStories-1M --output models/tinystories-1m.mlm
-
-# From a local checkpoint (coming soon)
-python3 tools/export_model.py --checkpoint model.pt --config config.json --output models/model.mlm
+python3 tools/export_model.py --model roneneldan/TinyStories-33M --output models/tinystories-33m.mlm
+python3 tools/export_model.py --dummy --output models/test.mlm        # random weights for smoke tests
 ```
 
 ## Running
 
 ```bash
-# Run self-test (no model required)
-cd build && ./mmllm --self-test
-
-# Generate text
-cd build && ./mmllm --model ../models/tinystories-1m.mlm --tokens 100
-
-# Custom prompt (comma-separated token IDs)
-cd build && ./mmllm --model ../models/tinystories-1m.mlm \
-    --prompt "42,128,256" --tokens 50
+./build/mmllm --model models/tinystories-33m.mlm --tokens 100
+./build/mmllm --model models/tinystories-33m.mlm --prompt "42,128,256" --tokens 50   # token ids
+python3 tools/decode.py --model roneneldan/TinyStories-33M "42 128 256 512 1"        # ids → text
 ```
 
-## Decoding Output
-
-The engine outputs token IDs. Use the Python decoder to convert to text:
-
-```bash
-python3 tools/decode.py --model roneneldan/TinyStories-1M "42 128 256 512 1"
-```
-
-## Performance
-
-On the GeForce 9400M (16 CUDA cores, 450 MHz):
-
-| Model | Params | Expected tok/s |
-|---|---|---|
-| TinyStories-1M | ~1M | 1-5 tok/s (GPU matmul) |
-| TinyStories-8M | ~8M | <1 tok/s |
-
-*Note: The CPU fallback (Core 2 Duo) should match or exceed GPU performance
-for these tiny models since data transfer overhead dominates.*
-
-## License
-
-MIT — Do whatever you want with this.
+Useful environment variables: `MMLLM_DEBUG`, `MMLLM_PROFILE=1` (per-stage timing), `MMLLM_CPU_ATTN`,
+`MMLLM_CPU_LN`, `MMLLM_FUSE`, `MMLLM_W_FP32`, `MMLLM_KV_FP32`, `MMLLM_LM_FP32`, `MMLLM_MAX_SEQ`.
 
 ## Needle 3 (tool calling) mode
 
-Cactus Compute Needle 3 lives in src/needle. It runs on the CPU by default, with an optional GPU
-backend for its 2-bit matrix-vector products (`--gpu`): see [NEEDLE.md](NEEDLE.md) — on the GeForce
-9400M the CPU is ~4x faster, so the GPU path is opt-in.
+```bash
+./build/mmllm --needle models/needle3.cact --tools tools.json --prompt "dim the living room to 30"
+./build/mmllm --needle models/needle3.cact --tools tools.json --serve --port 8080   # localhost HTTP
+```
+
+A from-scratch C++ port of the reference network: packed 2-bit weights multiplied directly, int8
+activation simulation, prefix caching, grammar-constrained decoding, argument repair and gates, and the
+confidence head. On the Mac mini's CPU it decodes at ~27 tok/s and uses ~105 MB, against 6.8 tok/s and
+79 MB for the official runner on the same machine; calls match the official runner on 45 of 47 test
+queries. An opt-in `--gpu` path exists but is ~3× slower than the CPU on this hardware. Everything is
+documented in [NEEDLE.md](NEEDLE.md), and the test tooling is in `tools/needle_ref`, `tools/needle_battery`
+and `tools/gpu_bench`.
+
+## License
+
+MIT — do whatever you want with this. Needle 3 weights are Apache-2.0 (Cactus Compute) and are not
+included in this repository.
