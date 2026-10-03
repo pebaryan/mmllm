@@ -1,0 +1,12 @@
+build/
+models/
+__pycache__/
+*.pyc
+*.cact
+*.mlm
+tools/egl_minimal
+tools/egl_test
+*.log
+*.out
+*.root-old
+scale_results/

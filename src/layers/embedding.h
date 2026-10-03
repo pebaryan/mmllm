@@ -1,11 +1,12 @@
 #pragma once
 #include "../engine/tensor.h"
 #include "../gl/program.h"
-#include "matmul.h"
 #include <memory>
+#include <vector>
 
 // Embedding lookup: maps token IDs to dense vectors.
-// For this prototype, we do the lookup on CPU and upload the result.
+// The lookup runs on the CPU from the raw packed weight arrays (the token table
+// is too tall to fit in a GPU texture on old GPUs) and the result is uploaded.
 class Embedding {
 public:
     Embedding();
@@ -13,19 +14,13 @@ public:
 
     bool init();
 
-    // Look up token + position embeddings
-    // token_id: the input token
-    // pos: the position in the sequence
-    // token_embed_weight: [vocab_size, d_model] texture
-    // pos_embed_weight: [max_seq_len, d_model] texture
-    // outputFBO: [1, d_model] output
+    // Look up token + position embeddings.
+    // tokenEmbed: packed RGBA32F data of the [vocab_size, d_model] table
+    // posEmbed:   packed RGBA32F data of the [max_seq_len, d_model] table
+    // outputFBO:  [1, d_model] output
     bool forward(int tokenId, int pos,
-                 const gl::Texture* tokenEmbedWeight,
-                 const gl::Texture* posEmbedWeight,
-                 int dModel, int vocabSize,
+                 const std::vector<float>* tokenEmbed,
+                 const std::vector<float>* posEmbed,
+                 int dModel, int vocabSize, int maxSeqLen,
                  gl::FBO& outputFBO);
-
-private:
-    // CPU-side storage for embedding weights
-    std::vector<float> readbackBuf_;
 };

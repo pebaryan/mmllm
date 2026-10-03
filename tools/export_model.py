@@ -42,30 +42,24 @@ def write_model_header(f, config):
         config['max_seq_len'],
         int(config.get('has_bias', True)),
         int(config.get('weight_tying', True)),
-        *([0] * 8),  # reserved
+        int(config.get('flags', 0)),            # reserved[0]: bit0 = attention not scaled (GPT-Neo)
+        int(config.get('eos_token', -1)) + 1,   # reserved[1]: EOS token id + 1 (0 = none)
+        int(config.get('local_window', 0)),     # reserved[2]: local attention window
+        int(config.get('local_mask', 0)),       # reserved[3]: bit i = layer i is local
+        *([0] * 4),
     )
     f.write(header)
 
 
 def write_tensor(f, data):
     """
-    Write a 2D float tensor in packed RGBA32F layout.
+    Write a 2D float tensor as raw row-major float32.
+    Model::load() reads rows*cols floats and packs them into RGBA32F texels itself.
     data: numpy array of shape [rows, cols]
     """
-    rows, cols = data.shape
-    tw = (cols + 3) // 4
-    th = rows
-
-    # Pack: 4 elements per texel (column-major within texel)
-    packed = np.zeros((th, tw, 4), dtype=np.float32)
-    for r in range(rows):
-        for c in range(cols):
-            tx = c // 4
-            tc = c % 4
-            packed[r, tx, tc] = float(data[r, c])
-
-    # Write as flat float32 array
-    f.write(packed.tobytes())
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    assert data.ndim == 2, data.shape
+    f.write(data.tobytes())
 
 
 def export_huggingface(model_name, output_path):
@@ -99,7 +93,7 @@ def export_huggingface(model_name, output_path):
             break
     ffn_hidden = getattr(config, 'intermediate_size', None)
     if ffn_hidden is None and sample_mlp_key:
-        ffn_hidden = state_dict[sample_mlp_key].shape[0]
+        ffn_hidden = state_dict[sample_mlp_key].shape[0 if is_gptneo else 1]
         print(f"Inferred ffn_hidden={ffn_hidden} from {sample_mlp_key}")
     elif ffn_hidden is None:
         ffn_hidden = 4 * config.hidden_size  # fallback
@@ -113,7 +107,14 @@ def export_huggingface(model_name, output_path):
         'd_head': config.hidden_size // (config.num_heads if hasattr(config, 'num_heads') else config.num_attention_heads),
         'ffn_hidden': ffn_hidden,
         'max_seq_len': getattr(config, 'max_position_embeddings', 512),
-        'has_bias': False,     # mmllm doesn't use biases yet
+        'has_bias': True,
+        'flags': 1 if is_gptneo else 0,   # GPT-Neo does not scale attention scores
+        'local_window': int(getattr(config, 'window_size', 0) or 0) if is_gptneo else 0,
+        'local_mask': sum(1 << i for i, t in enumerate(getattr(config, 'attention_layers', []) or [])
+                          if t == 'local') if is_gptneo else 0,
+        'eos_token': (getattr(config, 'eos_token_id', None)
+                      if getattr(config, 'eos_token_id', None) is not None
+                      else (tokenizer.eos_token_id if tokenizer.eos_token_id is not None else -1)),
         'weight_tying': True,  # mmllm always uses token_embed for LM head
     }
 
@@ -149,19 +150,20 @@ def export_huggingface(model_name, output_path):
             write_tensor(f, o.T)  # [D, D]
         else:
             # GPT-2: fused QKV [3*D, D] -> transpose to [D, 3*D]
-            q = state_dict[f'{prefix}attn.c_attn.weight'].cpu().numpy()  # [3*D, D]
-            write_tensor(f, q.T)  # [D, 3*D]
+            # Conv1D weight is already [D, 3*D] (x @ W), q|k|v concatenated: no transpose
+            q = state_dict[f'{prefix}attn.c_attn.weight'].cpu().numpy()  # [D, 3*D]
+            write_tensor(f, q)
 
             # Attention output: [D, D]
-            o = state_dict[f'{prefix}attn.c_proj.weight'].cpu().numpy()
-            write_tensor(f, o.T)
+            o = state_dict[f'{prefix}attn.c_proj.weight'].cpu().numpy()  # [D, D], already x @ W
+            write_tensor(f, o)
 
         # FFN weights (same for GPT-2 and GPT-Neo)
         w1 = state_dict[f'{prefix}mlp.c_fc.weight'].cpu().numpy()
-        write_tensor(f, w1.T)  # [D, H]
+        write_tensor(f, w1.T if is_gptneo else w1)  # -> [D, H]
 
         w2 = state_dict[f'{prefix}mlp.c_proj.weight'].cpu().numpy()
-        write_tensor(f, w2.T)  # [H, D]
+        write_tensor(f, w2.T if is_gptneo else w2)  # -> [H, D]
 
         # Layer norms
         write_tensor(f, state_dict[f'{prefix}ln_1.weight'].cpu().numpy().reshape(1, -1))
@@ -169,9 +171,23 @@ def export_huggingface(model_name, output_path):
         write_tensor(f, state_dict[f'{prefix}ln_2.weight'].cpu().numpy().reshape(1, -1))
         write_tensor(f, state_dict[f'{prefix}ln_2.bias'].cpu().numpy().reshape(1, -1))
 
+        # Attention biases: GPT-Neo has no q/k/v bias (zeros) but does have out_proj.bias
+        if is_gptneo:
+            write_tensor(f, np.zeros((1, 3 * D), dtype=np.float32))
+            write_tensor(f, state_dict[f'{prefix}attn.attention.out_proj.bias'].cpu().numpy().reshape(1, -1))
+        else:
+            write_tensor(f, state_dict[f'{prefix}attn.c_attn.bias'].cpu().numpy().reshape(1, -1))
+            write_tensor(f, state_dict[f'{prefix}attn.c_proj.bias'].cpu().numpy().reshape(1, -1))
+
     # Final layer norm
     write_tensor(f, state_dict['transformer.ln_f.weight'].cpu().numpy().reshape(1, -1))
     write_tensor(f, state_dict['transformer.ln_f.bias'].cpu().numpy().reshape(1, -1))
+
+    # FFN biases for every layer: up-projection bias [H], then down-projection bias [D]
+    for i in range(cfg['n_layers']):
+        prefix = f'transformer.h.{i}.'
+        write_tensor(f, state_dict[f'{prefix}mlp.c_fc.bias'].cpu().numpy().reshape(1, -1))
+        write_tensor(f, state_dict[f'{prefix}mlp.c_proj.bias'].cpu().numpy().reshape(1, -1))
 
     f.close()
     file_size = os.path.getsize(output_path)

@@ -62,4 +62,5 @@ void dispatchShader(
 
 // Helper: create a standalone FBO for use as a render target
 std::shared_ptr<gl::FBO> createRenderTarget(int rows, int cols,
-                                             const std::string& debugName = "target");
+                                             const std::string& debugName = "target",
+                                             gl::TextureFormat fmt = gl::TextureFormat::RGBA32F);

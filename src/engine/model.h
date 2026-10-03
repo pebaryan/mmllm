@@ -43,11 +43,15 @@ public:
 
     const std::vector<Weight>& weights() const { return weights_; }
 
+    // Bytes of GPU texture memory used by the weight textures
+    size_t gpuBytes() const { return gpuBytes_; }
+
 private:
     Weight* findWeight(const std::string& name);
     const Weight* findWeight(const std::string& name) const;
 
     ModelConfig config_;
     bool loaded_ = false;
+    size_t gpuBytes_ = 0;
     std::vector<Weight> weights_;
 };

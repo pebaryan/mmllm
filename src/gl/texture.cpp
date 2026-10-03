@@ -6,6 +6,8 @@
 
 namespace gl {
 
+bool quiet = false;
+
 Texture::~Texture() {
     destroy();
 }
@@ -15,6 +17,8 @@ bool Texture::create(int width, int height, TextureFormat fmt) {
 
     width_ = width;
     height_ = height;
+    integer_ = false;
+    type_ = GL_FLOAT;
 
     switch (fmt) {
         case TextureFormat::R32F:
@@ -27,6 +31,25 @@ bool Texture::create(int width, int height, TextureFormat fmt) {
             internalFormat_ = GL_RGBA32F;
             format_ = GL_RGBA;
             break;
+        case TextureFormat::RGBA16F:
+            channels_ = 4;
+            internalFormat_ = GL_RGBA16F;
+            format_ = GL_RGBA;
+            break;
+        case TextureFormat::R8UI:
+            channels_ = 1;
+            integer_ = true;
+            internalFormat_ = GL_R8UI;
+            format_ = GL_RED_INTEGER;
+            type_ = GL_UNSIGNED_BYTE;
+            break;
+        case TextureFormat::RGBA8UI:
+            channels_ = 4;
+            integer_ = true;
+            internalFormat_ = GL_RGBA8UI;
+            format_ = GL_RGBA_INTEGER;
+            type_ = GL_UNSIGNED_BYTE;
+            break;
     }
 
     glGenTextures(1, &id_);
@@ -34,7 +57,7 @@ bool Texture::create(int width, int height, TextureFormat fmt) {
 
     // Allocate texture storage
     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat_, width_, height_, 0,
-                 format_, GL_FLOAT, nullptr);
+                 format_, type_, nullptr);
 
     // Set sampling parameters — we use texelFetch so no filtering
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -44,9 +67,14 @@ bool Texture::create(int width, int height, TextureFormat fmt) {
 
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    std::printf("[mmllm] Created texture %u: %dx%d (%d channels, %s)\n",
-        id_, width_, height_, channels_,
-        fmt == TextureFormat::RGBA32F ? "RGBA32F" : "R32F");
+    const char* fname = fmt == TextureFormat::RGBA32F  ? "RGBA32F"
+                      : fmt == TextureFormat::RGBA16F  ? "RGBA16F"
+                      : fmt == TextureFormat::R8UI     ? "R8UI"
+                      : fmt == TextureFormat::RGBA8UI  ? "RGBA8UI"
+                                                       : "R32F";
+    if (!quiet)
+        std::printf("[mmllm] Created texture %u: %dx%d (%d channels, %s)\n",
+            id_, width_, height_, channels_, fname);
 
     return true;
 }
@@ -55,14 +83,29 @@ void Texture::upload(const float* data) {
     if (!id_) return;
     glBindTexture(GL_TEXTURE_2D, id_);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_,
-                    format_, GL_FLOAT, data);
+                    format_, type_, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Texture::uploadBytes(const uint8_t* data) {
+    if (!id_ || !integer_) return;
+    glBindTexture(GL_TEXTURE_2D, id_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_,
+                    format_, GL_UNSIGNED_BYTE, data);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void Texture::download(float* data) const {
     if (!id_) return;
     glBindTexture(GL_TEXTURE_2D, id_);
-    glGetTexImage(GL_TEXTURE_2D, 0, format_, GL_FLOAT, data);
+    glGetTexImage(GL_TEXTURE_2D, 0, format_, type_, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Texture::downloadBytes(uint8_t* data) const {
+    if (!id_ || !integer_) return;
+    glBindTexture(GL_TEXTURE_2D, id_);
+    glGetTexImage(GL_TEXTURE_2D, 0, format_, GL_UNSIGNED_BYTE, data);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
@@ -83,6 +126,8 @@ void Texture::destroy() {
     }
     width_ = height_ = 0;
     channels_ = 4;
+    integer_ = false;
+    type_ = GL_FLOAT;
 }
 
 Texture::Texture(Texture&& other) noexcept
@@ -90,8 +135,10 @@ Texture::Texture(Texture&& other) noexcept
     , width_(other.width_)
     , height_(other.height_)
     , channels_(other.channels_)
+    , integer_(other.integer_)
     , internalFormat_(other.internalFormat_)
     , format_(other.format_)
+    , type_(other.type_)
 {
     other.id_ = 0;
     other.width_ = other.height_ = 0;
@@ -104,8 +151,10 @@ Texture& Texture::operator=(Texture&& other) noexcept {
         width_ = other.width_;
         height_ = other.height_;
         channels_ = other.channels_;
+        integer_ = other.integer_;
         internalFormat_ = other.internalFormat_;
         format_ = other.format_;
+        type_ = other.type_;
         other.id_ = 0;
         other.width_ = other.height_ = 0;
     }

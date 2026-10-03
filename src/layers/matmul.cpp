@@ -21,6 +21,16 @@ bool MatMul::init() {
         return false;
     }
 
+    // Fused variant (optional: a failure here only disables fusion)
+    fusedFrag_ = std::make_unique<gl::Shader>();
+    if (fusedFrag_->compileFromFile(GL_FRAGMENT_SHADER, "src/shaders/matmul_fused.frag")) {
+        fusedProg_ = std::make_unique<gl::Program>();
+        if (!fusedProg_->link(*vertShader_, *fusedFrag_)) fusedProg_.reset();
+    }
+    if (!fusedAvailable()) {
+        std::fprintf(stderr, "[mmllm] Fused matmul shader unavailable; fusion disabled\n");
+    }
+
     std::printf("[mmllm] MatMul layer initialized\n");
     return true;
 }
@@ -82,4 +92,49 @@ GPUTensor MatMul::forward(const GPUTensor& a, const GPUTensor& b) {
     // This isn't great. Let me fix the approach - result owns the fbo.
 
     return result;
+}
+
+bool MatMul::forwardFused(const gl::Texture& texA, int rowsA, int colsA,
+                          const gl::Texture& texB, int rowsB, int colsB,
+                          gl::FBO& outputFBO, const FusedOps& ops)
+{
+    if (!fusedAvailable()) return false;
+
+    if (colsA != rowsB) {
+        std::fprintf(stderr, "[mmllm] Fused MatMul dimension mismatch: A(%d,%d) B(%d,%d)\n",
+                     rowsA, colsA, rowsB, colsB);
+        return false;
+    }
+
+    const bool hasLN = ops.lnStats && ops.lnGain && ops.lnBias;
+    if (hasLN && rowsA != 1) {
+        std::fprintf(stderr, "[mmllm] Fused MatMul LayerNorm prologue needs M == 1\n");
+        return false;
+    }
+
+    // Samplers a call does not use still need a valid texture bound: use A as a dummy.
+    const gl::Texture* dummy = &texA;
+
+    dispatchShader(*fusedProg_, outputFBO,
+        {
+            {0, &texA, "texA"},
+            {1, &texB, "texB"},
+            {2, ops.bias ? ops.bias : dummy, "texBias"},
+            {3, ops.residual ? ops.residual : dummy, "texRes"},
+            {4, hasLN ? ops.lnStats : dummy, "texLnStats"},
+            {5, hasLN ? ops.lnGain : dummy, "texLnGain"},
+            {6, hasLN ? ops.lnBias : dummy, "texLnBias"}
+        },
+        [&](gl::Program& prog) {
+            prog.setInt("M", rowsA);
+            prog.setInt("K", colsA);
+            prog.setInt("N", colsB);
+            prog.setInt("outputTexWidth", outputFBO.colorTexture().width());
+            prog.setInt("hasLN", hasLN ? 1 : 0);
+            prog.setInt("hasBias", ops.bias ? 1 : 0);
+            prog.setInt("hasResidual", ops.residual ? 1 : 0);
+            prog.setInt("doGelu", ops.gelu ? 1 : 0);
+        });
+
+    return true;
 }

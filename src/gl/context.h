@@ -2,21 +2,24 @@
 #include <GL/glew.h>
 #include <string>
 
-struct GLFWwindow;
-
 namespace gl {
 
+// Headless OpenGL 3.3 core context created through EGL (surfaceless).
+// No X server, window system or DISPLAY/XAUTHORITY is needed: it talks to
+// the GPU directly through the DRM render node.
 class Context {
 public:
     Context();
     ~Context();
 
+    // width/height/title are accepted for API compatibility and ignored.
     bool init(int width = 256, int height = 256, const std::string& title = "mmllm");
     void destroy();
-    void swapBuffers();
-    void pollEvents();
-    bool shouldClose() const;
-    GLFWwindow* window() const { return window_; }
+
+    // No window: kept so existing callers keep compiling.
+    void swapBuffers() {}
+    void pollEvents() {}
+    bool shouldClose() const { return false; }
 
     // Prevent copy
     Context(const Context&) = delete;
@@ -26,7 +29,8 @@ public:
     Context& operator=(Context&& other) noexcept;
 
 private:
-    GLFWwindow* window_ = nullptr;
+    void* display_ = nullptr;  // EGLDisplay
+    void* context_ = nullptr;  // EGLContext
 };
 
 } // namespace gl

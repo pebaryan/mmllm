@@ -1,7 +1,9 @@
 #include "model.h"
+#include <GL/glew.h>
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 
 bool Model::load(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary);
@@ -33,6 +35,10 @@ bool Model::load(const std::string& filepath) {
     config_.max_seq_len  = header.max_seq_len;
     config_.has_bias     = header.has_bias != 0;
     config_.weight_tying = header.weight_tying != 0;
+    config_.attn_unscaled = (header.reserved[0] & 1) != 0;
+    config_.eos_token    = header.reserved[1] > 0 ? header.reserved[1] - 1 : -1;
+    config_.local_window = header.reserved[2] > 0 ? header.reserved[2] : 0;
+    config_.local_mask   = static_cast<uint32_t>(header.reserved[3]);
 
     if (!config_.valid()) {
         std::fprintf(stderr, "[mmllm] Invalid model config\n");
@@ -74,11 +80,41 @@ bool Model::load(const std::string& filepath) {
         Weight w;
         w.name = name;
         w.data = std::move(packed);
-        if (!w.texture.create(tw, th, gl::TextureFormat::RGBA32F)) {
-            std::fprintf(stderr, "[mmllm] Failed to create texture for '%s'\n", name.c_str());
-            return false;
+
+        // Tensors larger than GL_MAX_TEXTURE_SIZE (such as the vocab x d_model token
+        // table on a GPU limited to 8192) cannot live in a texture. Keep them on the
+        // CPU only; callers use rawWeights() for those.
+        GLint maxTex = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTex);
+        if (maxTex <= 0) maxTex = 8192;
+
+        // The embedding tables are only ever read on the CPU (embedding lookup and the LM head
+        // table is built from the raw data), so they get no GPU texture at all.
+        const bool cpuOnly = (name == "token_embed" || name == "pos_embed");
+
+        // The big matmul weights are stored as fp16 textures: half the GPU memory (the 9400M has
+        // only 256 MB of its own; spilling to system memory is very slow and eventually fails
+        // with ENOMEM) and half the bandwidth. MMLLM_W_FP32=1 keeps them fp32.
+        auto endsWith = [&](const char* suf) {
+            const std::string s(suf);
+            return name.size() >= s.size() && name.compare(name.size() - s.size(), s.size(), s) == 0;
+        };
+        const bool bigWeight = endsWith("wqkv") || endsWith("wo") || endsWith("wg1") || endsWith("wg2");
+        const bool useHalf = bigWeight && std::getenv("MMLLM_W_FP32") == nullptr;
+
+        if (cpuOnly) {
+            // no texture
+        } else if (tw > maxTex || th > maxTex) {
+            std::printf("[mmllm] '%s' is %dx%d texels (> max texture %d): kept on CPU only\n",
+                        name.c_str(), tw, th, (int)maxTex);
+        } else {
+            if (!w.texture.create(tw, th, useHalf ? gl::TextureFormat::RGBA16F : gl::TextureFormat::RGBA32F)) {
+                std::fprintf(stderr, "[mmllm] Failed to create texture for '%s'\n", name.c_str());
+                return false;
+            }
+            w.texture.upload(w.data.data());
+            gpuBytes_ += (size_t)tw * th * (useHalf ? 8 : 16);
         }
-        w.texture.upload(w.data.data());
         weights_.push_back(std::move(w));
         return true;
     };

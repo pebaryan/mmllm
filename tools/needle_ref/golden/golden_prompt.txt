@@ -1,0 +1,4 @@
+<|im_start|>user
+<tools>[{"name":"set_lights","description":"Turn a room lights on or off and set the brightness","parameters":{"type":"object","properties":{"room":{"type":"string"},"on":{"type":"boolean"},"brightness":{"type":"integer"}},"required":["room"]}},{"name":"set_thermostat","description":"Set the thermostat temperature in Celsius","parameters":{"type":"object","properties":{"temperature":{"type":"integer"}},"required":["temperature"]}}]</tools>
+dim the living room to 30<|im_end|>
+<|im_start|>assistant

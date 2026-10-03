@@ -95,10 +95,11 @@ void dispatchShader(
     target.unbind();
 }
 
-std::shared_ptr<gl::FBO> createRenderTarget(int rows, int cols, const std::string& debugName) {
+std::shared_ptr<gl::FBO> createRenderTarget(int rows, int cols, const std::string& debugName,
+                                             gl::TextureFormat fmt) {
     int tw = packedWidth(cols);
     auto fbo = std::make_shared<gl::FBO>();
-    if (!fbo->create(tw, rows, gl::TextureFormat::RGBA32F)) {
+    if (!fbo->create(tw, rows, fmt)) {
         std::fprintf(stderr, "[mmllm] Failed to create render target '%s': %dx%d\n",
                      debugName.c_str(), tw, rows);
         return nullptr;

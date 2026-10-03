@@ -5,26 +5,32 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find dependencies
-find_package(OpenGL REQUIRED)
+find_package(OpenGL REQUIRED COMPONENTS OpenGL EGL)
 find_package(GLEW REQUIRED)
-find_package(glfw3 REQUIRED)
+find_package(Threads REQUIRED)
 
 # Collect all source files
 file(GLOB_RECURSE SOURCES
     src/gl/*.cpp
     src/engine/*.cpp
     src/layers/*.cpp
+    src/needle/*.cpp
     src/main.cpp
 )
 
 # Create executable
 add_executable(mmllm ${SOURCES})
 
+# The Needle CPU path is plain C++ loops; GCC 11 only auto-vectorises at -O3
+file(GLOB NEEDLE_SOURCES src/needle/*.cpp)
+set_source_files_properties(${NEEDLE_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3")
+
 # Link libraries
 target_link_libraries(mmllm
     ${OPENGL_gl_LIBRARY}
     GLEW::GLEW
-    glfw
+    OpenGL::EGL
+    Threads::Threads
 )
 
 # Include directories
@@ -57,7 +63,7 @@ message(STATUS "mmllm v${PROJECT_VERSION}")
 message(STATUS "C++ Compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "OpenGL: ${OPENGL_gl_LIBRARY}")
 message(STATUS "GLEW: ${GLEW_LIBRARIES}")
-message(STATUS "GLFW: found")
+message(STATUS "EGL: headless (no X server needed)")
 message(STATUS "")
 message(STATUS "To build:")
 message(STATUS "  mkdir build && cd build")

@@ -41,7 +41,7 @@ bool FBO::create(int width, int height, TextureFormat fmt) {
         return false;
     }
 
-    std::printf("[mmllm] Created FBO %u: %dx%d\n", id_, width_, height_);
+    if (!quiet) std::printf("[mmllm] Created FBO %u: %dx%d\n", id_, width_, height_);
     return true;
 }
 

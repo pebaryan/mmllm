@@ -22,6 +22,7 @@
 #include "gl/fbo.h"
 #include "engine/model.h"
 #include "engine/inference.h"
+#include "needle/needle_main.h"
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -31,6 +32,10 @@
 bool runSelfTest(gl::Context& ctx);
 
 int main(int argc, char** argv) {
+    // Needle 3 mode (CPU, no OpenGL context): mmllm --needle model.cact --tools t.json --prompt "..."
+    for (int i = 1; i < argc; i++)
+        if (std::string(argv[i]) == "--needle") return needle::needleMain(argc, argv);
+
     std::printf("========================================\n");
     std::printf("  mmllm — Minimal GLSL LLM Engine v1.0\n");
     std::printf("  OpenGL 3.3 / GLSL 3.30\n");
@@ -153,8 +158,9 @@ int main(int argc, char** argv) {
     double elapsed = std::chrono::duration<double>(endTime - startTime).count();
 
     // Print results
+    const size_t newTokens = output.size() - promptTokens.size();
     std::printf("\n[mmllm] Generated %zu tokens in %.2f seconds (%.2f tok/s)\n",
-                output.size(), elapsed, output.size() / elapsed);
+                newTokens, elapsed, newTokens / elapsed);
 
     std::printf("[mmllm] Output token IDs:\n  ");
     for (size_t i = promptTokens.size(); i < output.size(); i++) {
@@ -248,7 +254,12 @@ bool runSelfTest(gl::Context& ctx) {
                 {0, &texA, "texA"},
                 {1, &texB, "texB"}
             }},
-            [&](gl::Program& p) { p.setInt("K", 2); });
+            [&](gl::Program& p) {
+                p.setInt("M", 2);
+                p.setInt("K", 2);
+                p.setInt("N", 2);
+                p.setInt("outputTexWidth", 1);
+            });
 
         // Read back result
         // Texture is 1x2 RGBA32F, so download gives 8 floats:

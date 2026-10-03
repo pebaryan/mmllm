@@ -58,7 +58,7 @@ Instead of CUDA or OpenCL, it uses the classic "render-to-texture" GPGPU approac
 
 ```bash
 # Install dependencies (Ubuntu/ZorinOS)
-sudo apt install build-essential cmake libgl1-mesa-dev libglew-dev libglfw3-dev python3-pip
+sudo apt install build-essential cmake libgl1-mesa-dev libglew-dev python3-pip
 
 # Build
 mkdir -p build && cd build
@@ -139,3 +139,9 @@ for these tiny models since data transfer overhead dominates.*
 ## License
 
 MIT — Do whatever you want with this.
+
+## Needle 3 (tool calling) mode
+
+Cactus Compute Needle 3 lives in src/needle. It runs on the CPU by default, with an optional GPU
+backend for its 2-bit matrix-vector products (`--gpu`): see [NEEDLE.md](NEEDLE.md) — on the GeForce
+9400M the CPU is ~4x faster, so the GPU path is opt-in.
