@@ -4,7 +4,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 #include <utility>
 
 namespace gl {
@@ -15,13 +17,47 @@ Context::~Context() {
     destroy();
 }
 
-// Get an EGLDisplay without any window system: prefer the Mesa surfaceless
-// platform, fall back to the first EGL device (EGL_EXT_platform_device).
+// With NVIDIA's proprietary driver, headless EGL goes through the device platform. Mesa's surfaceless
+// platform would still succeed there (with the llvmpipe software renderer), so when the NVIDIA kernel
+// driver is loaded look for an NVIDIA EGL device first. MMLLM_EGL=surfaceless skips this, and
+// MMLLM_EGL_DEVICE=<n> selects the n-th EGL device explicitly.
+static EGLDisplay openNvidiaDeviceDisplay(PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplay) {
+    const char* mode = std::getenv("MMLLM_EGL");
+    if (mode && std::strcmp(mode, "surfaceless") == 0) return EGL_NO_DISPLAY;
+    const char* forced = std::getenv("MMLLM_EGL_DEVICE");
+    if (!forced && access("/proc/driver/nvidia/version", R_OK) != 0) return EGL_NO_DISPLAY;
+
+    auto queryDevices = reinterpret_cast<PFNEGLQUERYDEVICESEXTPROC>(eglGetProcAddress("eglQueryDevicesEXT"));
+    if (!queryDevices) return EGL_NO_DISPLAY;
+    EGLDeviceEXT devices[16];
+    EGLint n = 0;
+    if (!queryDevices(16, devices, &n) || n <= 0) return EGL_NO_DISPLAY;
+
+    for (EGLint i = 0; i < n; i++) {
+        if (forced && i != std::atoi(forced)) continue;
+        EGLDisplay dpy = getPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devices[i], nullptr);
+        if (dpy == EGL_NO_DISPLAY) continue;
+        EGLint major = 0, minor = 0;
+        if (!eglInitialize(dpy, &major, &minor)) continue;
+        const char* vendor = eglQueryString(dpy, EGL_VENDOR);
+        if (forced || (vendor && std::strstr(vendor, "NVIDIA"))) return dpy;
+        eglTerminate(dpy);
+    }
+    return EGL_NO_DISPLAY;
+}
+
+// Get an EGLDisplay without any window system: prefer an NVIDIA device when the proprietary driver is
+// loaded, then the Mesa surfaceless platform, then the first EGL device (EGL_EXT_platform_device).
 static EGLDisplay openHeadlessDisplay() {
     auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
         eglGetProcAddress("eglGetPlatformDisplayEXT"));
     if (!getPlatformDisplay) {
         return EGL_NO_DISPLAY;
+    }
+
+    EGLDisplay nv = openNvidiaDeviceDisplay(getPlatformDisplay);
+    if (nv != EGL_NO_DISPLAY) {
+        return nv;
     }
 
     EGLDisplay dpy = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);

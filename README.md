@@ -92,6 +92,9 @@ included in this repository.
 
 ## GPU comparison
 
-Six GPUs (GT218, HD 6450, Quadro 2000, 8600 GTS, Quadro K2000, Quadro 4000) were run through the same
-engine on an Atom D525 machine: see [GPU_RESULTS.md](GPU_RESULTS.md). Best result: Quadro K2000
-reclocked to its top `pstate`, GPT-2 small at ~33 tokens/s.
+Nine GPUs (GT218, HD 6450, 8600 GTS, Quadro 2000, K2000, 4000, P400, P620 and P2000) were run through the
+same engine on an Atom D525 machine: see [GPU_RESULTS.md](GPU_RESULTS.md). Best result: Quadro K2000
+reclocked to its top `pstate`, GPT-2 small at ~33 tokens/s. On that slow CPU, nouveau beats NVIDIA's
+proprietary driver by up to 3× because the proprietary driver's per-draw CPU overhead dominates. The
+engine prefers NVIDIA's EGL device when the proprietary driver is loaded (`MMLLM_EGL=surfaceless` and
+`MMLLM_EGL_DEVICE=<n>` override this).
